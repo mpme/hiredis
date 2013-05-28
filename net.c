@@ -45,6 +45,8 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <poll.h>
+#include <limits.h>
 
 #include "net.h"
 #include "sds.h"
@@ -53,7 +55,7 @@
 void __redisSetError(redisContext *c, int type, const char *str);
 
 static void __redisSetErrorFromErrno(redisContext *c, int type, const char *prefix) {
-    char buf[128];
+    char buf[128] = { 0 };
     size_t len = 0;
 
     if (prefix != NULL)
@@ -111,6 +113,45 @@ static int redisSetBlocking(redisContext *c, int fd, int blocking) {
     return REDIS_OK;
 }
 
+int redisKeepAlive(redisContext *c, int interval) {
+    int val = 1;
+    int fd = c->fd;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) == -1){
+        __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
+        return REDIS_ERR;
+    }
+
+#ifdef _OSX
+    val = interval;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &val, sizeof(val)) < 0) {
+        __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
+        return REDIS_ERR;
+    }
+#else
+    val = interval;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0) {
+        __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
+        return REDIS_ERR;
+    }
+
+    val = interval/3;
+    if (val == 0) val = 1;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0) {
+        __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
+        return REDIS_ERR;
+    }
+
+    val = 3;
+    if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &val, sizeof(val)) < 0) {
+        __redisSetError(c,REDIS_ERR_OTHER,strerror(errno));
+        return REDIS_ERR;
+    }
+#endif
+
+    return REDIS_OK;
+}
+
 static int redisSetTcpNoDelay(redisContext *c, int fd) {
     int yes = 1;
     if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) == -1) {
@@ -121,28 +162,39 @@ static int redisSetTcpNoDelay(redisContext *c, int fd) {
     return REDIS_OK;
 }
 
+#define __MAX_MSEC (((LONG_MAX) - 999) / 1000)
+
 static int redisContextWaitReady(redisContext *c, int fd, const struct timeval *timeout) {
-    struct timeval to;
-    struct timeval *toptr = NULL;
-    fd_set wfd;
+    struct pollfd   wfd[1];
+    long msec;
+
+    msec          = -1;
+    wfd[0].fd     = fd;
+    wfd[0].events = POLLOUT;
 
     /* Only use timeout when not NULL. */
     if (timeout != NULL) {
-        to = *timeout;
-        toptr = &to;
-    }
-
-    if (errno == EINPROGRESS) {
-        FD_ZERO(&wfd);
-        FD_SET(fd, &wfd);
-
-        if (select(FD_SETSIZE, NULL, &wfd, NULL, toptr) == -1) {
-            __redisSetErrorFromErrno(c,REDIS_ERR_IO,"select(2)");
+        if (timeout->tv_usec > 1000000 || timeout->tv_sec > __MAX_MSEC) {
+	     __redisSetErrorFromErrno(c, REDIS_ERR_IO, NULL);
             close(fd);
             return REDIS_ERR;
         }
 
-        if (!FD_ISSET(fd, &wfd)) {
+        msec = (timeout->tv_sec * 1000) + ((timeout->tv_usec + 999) / 1000);
+
+        if (msec < 0 || msec > INT_MAX) {
+            msec = INT_MAX;
+        }
+    }
+
+    if (errno == EINPROGRESS) {
+        int res;
+
+        if ((res = poll(wfd, 1, msec)) == -1) {
+            __redisSetErrorFromErrno(c, REDIS_ERR_IO, "poll(2)");
+            close(fd);
+            return REDIS_ERR;
+        } else if (res == 0) {
             errno = ETIMEDOUT;
             __redisSetErrorFromErrno(c,REDIS_ERR_IO,NULL);
             close(fd);
