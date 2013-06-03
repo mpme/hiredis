@@ -36,6 +36,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <ctype.h>
+#include <sys/socket.h>
 
 #include "hiredis.h"
 #include "net.h"
@@ -1107,7 +1108,12 @@ int redisEnableKeepAlive(redisContext *c) {
 int redisBufferRead(redisContext *c) {
     char buf[1024*16];
     int nread;
+    
+    // @cescofry: SIGPIPE fault fix in iOS, ignore SIGPIPE when writing to sockets.
+    int set = 1;
+    setsockopt(c->fd, SOL_SOCKET, SO_NOSIGPIPE, (void *)&set, sizeof(int));
 
+    
     /* Return early when the context has seen an error. */
     if (c->err)
         return REDIS_ERR;
