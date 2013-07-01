@@ -41,6 +41,8 @@
 #include "net.h"
 #include "sds.h"
 
+#define LOG_REDIS_OUTPUT       1 // explicit log the Redis output buffer
+
 static redisReply *createReplyObject(int type);
 static void *createStringObject(const redisReadTask *task, char *str, size_t len);
 static void *createArrayObject(const redisReadTask *task, int elements);
@@ -1238,6 +1240,9 @@ int redisvAppendCommand(redisContext *c, const char *format, va_list ap) {
     int len;
 
     len = redisvFormatCommand(&cmd,format,ap);
+    
+    if (LOG_REDIS_OUTPUT) printf("--- command: %s\n", cmd);
+    
     if (len == -1) {
         __redisSetError(c,REDIS_ERR_OOM,"Out of memory");
         return REDIS_ERR;
