@@ -41,7 +41,7 @@
 #include "net.h"
 #include "sds.h"
 
-#define LOG_REDIS_OUTPUT       1 // explicit log the Redis output buffer
+#define LOG_REDIS_OUTPUT       0 // explicit log the Redis output buffer
 
 static redisReply *createReplyObject(int type);
 static void *createStringObject(const redisReadTask *task, char *str, size_t len);
